@@ -1,0 +1,109 @@
+name: fetch-morrow-zenodo
+
+# 用途：在 GitHub 的服务器上（境外、能直连 Zenodo）把 Morrow 100 Ah LFP 数据集
+#       全部 parquet 拉下来，再以 artifact / Release 形式交给你下载。
+# 用法：把本文件放到你自己仓库的 .github/workflows/ 下，然后
+#       Actions -> fetch-morrow-zenodo -> Run workflow
+
+on:
+  workflow_dispatch:
+    inputs:
+      rec:
+        description: "Zenodo record id"
+        default: "24005873"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download from Zenodo
+        env:
+          REC: ${{ inputs.rec }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, urllib.request, urllib.parse, sys
+          import concurrent.futures as cf
+
+          rec = os.environ.get("REC", "24005873")
+          api = f"https://zenodo.org/api/records/{rec}"
+          print("fetch", api)
+          with urllib.request.urlopen(api, timeout=120) as r:
+              j = json.load(r)
+          files = j["files"]
+          total = sum(f["size"] for f in files)
+          print(f"files={len(files)} total={total/1e9:.2f} GB")
+          os.makedirs("morrow", exist_ok=True)
+
+          def one(f):
+              key = f["key"]
+              url = (f"https://zenodo.org/api/records/{rec}/files/"
+                     f"{urllib.parse.quote(key)}/content")
+              dst = os.path.join("morrow", key)
+              d = os.path.dirname(dst)
+              if d: os.makedirs(d, exist_ok=True)
+              if os.path.exists(dst) and os.path.getsize(dst) == f["size"]:
+                  return key
+              for a in range(6):
+                  try:
+                      with urllib.request.urlopen(url, timeout=180) as src, open(dst + ".part", "wb") as out:
+                          while True:
+                              chunk = src.read(1 << 20)
+                              if not chunk: break
+                              out.write(chunk)
+                      if os.path.getsize(dst + ".part") == f["size"]:
+                          os.replace(dst + ".part", dst)
+                          return key
+                  except Exception as e:
+                      print("retry", key, a, repr(e)[:120])
+              print("FAILED", key)
+              return None
+
+          with cf.ThreadPoolExecutor(max_workers=8) as ex:
+              results = list(ex.map(one, files))
+          bad = [k for k in results if k is None]
+          print("done, failed:", len(bad))
+          if bad:
+              print("\n".join(bad[:50]))
+          PY
+
+      - name: Bundle
+        run: |
+          set -euo pipefail
+          du -sh morrow || true
+          (cd morrow && zip -0 -r -q ../morrow.zip .)
+          ls -lh morrow.zip
+          # 单个 release 资产上限 2 GB，超出则切块
+          split -b 1900M morrow.zip morrow.zip.part. || true
+          ls -lh morrow.zip*
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: morrow-100ah-lfp
+          path: morrow.zip*
+          retention-days: 30
+
+      - name: Upload to HuggingFace (optional)
+        if: ${{ secrets.HF_TOKEN != '' }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_REPO: ${{ vars.HF_REPO }}
+        run: |
+          pip install -q -U huggingface_hub
+          python3 - <<'PY'
+          import os
+          from huggingface_hub import HfApi
+          repo = os.environ.get("HF_REPO") or "morrow-100ah-lfp"
+          api = HfApi(token=os.environ["HF_TOKEN"])
+          api.create_repo(repo, repo_type="dataset", exist_ok=True)
+          api.upload_folder(folder_path="morrow", repo_id=repo, repo_type="dataset")
+          print("uploaded to", repo)
+          PY
