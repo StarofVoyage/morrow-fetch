@@ -20,6 +20,9 @@ jobs:
   fetch:
     runs-on: ubuntu-latest
     timeout-minutes: 350
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      HF_REPO: ${{ vars.HF_REPO }}
     steps:
       - uses: actions/checkout@v4
 
@@ -92,7 +95,7 @@ jobs:
           retention-days: 30
 
       - name: Upload to HuggingFace (optional)
-        if: ${{ secrets.HF_TOKEN != '' }}
+        if: env.HF_TOKEN != ''
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_REPO: ${{ vars.HF_REPO }}
