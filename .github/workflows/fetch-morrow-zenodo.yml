@@ -1,29 +1,21 @@
 name: fetch-morrow-zenodo
 
-# 用途：在 GitHub 的服务器上（境外、能直连 Zenodo）把 Morrow 100 Ah LFP 数据集
-#       全部 parquet 拉下来，再以 artifact 形式交给你下载。
-# 用法：Actions -> fetch-morrow-zenodo -> Run workflow
-
+# 从 Zenodo 拉取 Morrow 100 Ah LFP 数据集（record 24261116 = v1.0.1, open, CC-BY-4.0）
 on:
   workflow_dispatch:
     inputs:
       rec:
         description: "Zenodo record id"
-        default: "24005873"
+        default: "24261116"
         required: true
-
-permissions:
-  contents: write
 
 jobs:
   fetch:
     runs-on: ubuntu-latest
     timeout-minutes: 350
-    env:
-      HF_TOKEN: ${{ secrets.HF_TOKEN }}
-      HF_REPO: ${{ vars.HF_REPO }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Show disk
+        run: df -h /
 
       - name: Download from Zenodo
         env:
@@ -31,69 +23,41 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import json, os, urllib.request, urllib.parse, sys
+          import json, os, sys, urllib.request, urllib.parse
           import concurrent.futures as cf
 
-          rec = os.environ.get("REC", "24005873")
+          rec = os.environ.get("REC", "24261116")
           api = f"https://zenodo.org/api/records/{rec}"
-          print("fetch", api)
-          req = urllib.request.Request(api, headers={"Accept": "application/json",
-                                                     "User-Agent": "morrow-fetch/1.0"})
+          req = urllib.request.Request(api, headers={"Accept": "application/json", "User-Agent": "morrow-fetch/1.0"})
           with urllib.request.urlopen(req, timeout=180) as r:
               j = json.load(r)
-
-          print("TOP KEYS:", list(j.keys()))
-          fo = j.get("files")
-          print("files type:", type(fo).__name__)
-          if isinstance(fo, dict):
-              print("files keys:", list(fo.keys()))
-              print("count field:", fo.get("count"), "total_bytes:", fo.get("total_bytes"))
-              ent = fo.get("entries")
-              if isinstance(ent, dict):
-                  files = []
-                  for k, v in ent.items():
-                      if not isinstance(v, dict):
-                          continue
-                      v.setdefault("key", k)
-                      files.append(v)
-              elif isinstance(ent, list):
-                  files = ent
-              else:
-                  files = []
-          elif isinstance(fo, list):
-              files = fo
-          else:
-              files = []
-
+          md = j.get("metadata", {})
+          print("record:", rec, "version:", md.get("version"), "access:", md.get("access_right"))
+          files = j.get("files") or []
           total = sum(int(f.get("size") or 0) for f in files)
           print(f"files={len(files)} total={total/1e9:.2f} GB")
           if not files:
-              print("RAW files snippet:", json.dumps(fo, ensure_ascii=False)[:1200])
-              print("RAW record snippet:", json.dumps(j, ensure_ascii=False)[:1200])
-              sys.exit("no files found")
-
+              sys.exit("no files (restricted?)")
           os.makedirs("morrow", exist_ok=True)
 
           def one(f):
-              key = f.get("key") or f.get("filename")
+              key = f.get("key")
               size = int(f.get("size") or 0)
-              url = (f"https://zenodo.org/api/records/{rec}/files/"
-                     f"{urllib.parse.quote(str(key))}/content")
+              url = f"https://zenodo.org/api/records/{rec}/files/{urllib.parse.quote(str(key))}/content"
               dst = os.path.join("morrow", str(key))
-              d = os.path.dirname(dst)
-              if d: os.makedirs(d, exist_ok=True)
               if os.path.exists(dst) and os.path.getsize(dst) == size:
                   return key
-              for a in range(6):
+              for a in range(8):
                   try:
-                      req2 = urllib.request.Request(url, headers={"User-Agent": "morrow-fetch/1.0"})
-                      with urllib.request.urlopen(req2, timeout=300) as src, open(dst + ".part", "wb") as out:
+                      rq = urllib.request.Request(url, headers={"User-Agent": "morrow-fetch/1.0"})
+                      with urllib.request.urlopen(rq, timeout=600) as src, open(dst + ".part", "wb") as out:
                           while True:
                               chunk = src.read(1 << 20)
                               if not chunk: break
                               out.write(chunk)
                       if os.path.getsize(dst + ".part") == size:
                           os.replace(dst + ".part", dst)
+                          print("ok", key, size)
                           return key
                       print("size mismatch", key, os.path.getsize(dst + ".part"), size)
                   except Exception as e:
@@ -101,46 +65,33 @@ jobs:
               print("FAILED", key)
               return None
 
-          with cf.ThreadPoolExecutor(max_workers=8) as ex:
+          with cf.ThreadPoolExecutor(max_workers=4) as ex:
               results = list(ex.map(one, files))
           bad = [k for k in results if k is None]
           print("done, failed:", len(bad))
           if bad:
-              print("\n".join(map(str, bad[:50])))
-              sys.exit(f"{len(bad)} files failed")
+              sys.exit("some files failed")
           PY
 
-      - name: Bundle
+      - name: Verify
         run: |
           set -euo pipefail
-          test -d morrow && test -n "$(ls -A morrow)" || { echo "morrow/ 为空，终止"; exit 1; }
           du -sh morrow
-          find morrow -type f | wc -l
-          (cd morrow && zip -0 -r -q ../morrow.zip .)
-          ls -lh morrow.zip
-          split -b 1900M morrow.zip morrow.zip.part. || true
-          ls -lh morrow.zip*
+          ls -lh morrow
+          python3 - <<'PY'
+          import zipfile, os
+          z = os.path.join("morrow", "MORROW__TRFFCXXXXX__bdf-parquet.zip")
+          if os.path.exists(z):
+              with zipfile.ZipFile(z) as zf:
+                  names = zf.namelist()
+              print("entries in zip:", len(names))
+              print("first 8:", names[:8])
+          PY
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: morrow-100ah-lfp
-          path: morrow.zip*
-          retention-days: 30
-
-      - name: Upload to HuggingFace (optional)
-        if: env.HF_TOKEN != ''
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          HF_REPO: ${{ vars.HF_REPO }}
-        run: |
-          pip install -q -U huggingface_hub
-          python3 - <<'PY'
-          import os
-          from huggingface_hub import HfApi
-          repo = os.environ.get("HF_REPO") or "morrow-100ah-lfp"
-          api = HfApi(token=os.environ["HF_TOKEN"])
-          api.create_repo(repo, repo_type="dataset", exist_ok=True)
-          api.upload_folder(folder_path="morrow", repo_id=repo, repo_type="dataset")
-          print("uploaded to", repo)
-          PY
+          name: morrow-100ah-lfp-v1.0.1
+          path: morrow/*
+          retention-days: 14
+          compression-level: 0
