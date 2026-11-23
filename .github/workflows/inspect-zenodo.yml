@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Dump record access info
+      - name: Dump record info
         env:
           REC: ${{ inputs.rec }}
         run: |
@@ -20,39 +20,25 @@ jobs:
           import json, os, urllib.request
           rec = os.environ["REC"]
           def get(u):
-              req = urllib.request.Request(u, headers={"Accept": "application/json",
-                                                       "User-Agent": "morrow-inspect/1.0"})
+              req = urllib.request.Request(u, headers={"Accept": "application/json", "User-Agent": "morrow-inspect/1.0"})
               with urllib.request.urlopen(req, timeout=120) as r:
                   return json.load(r)
           j = get(f"https://zenodo.org/api/records/{rec}")
           md = j.get("metadata", {})
-          print("ID:", j.get("id"), " conceptrecid:", j.get("conceptrecid"))
-          print("access_right:", md.get("access_right"))
-          print("access_conditions:", json.dumps(md.get("access_conditions"), ensure_ascii=False))
-          print("owners:", json.dumps(j.get("owners"), ensure_ascii=False))
-          print("state:", json.dumps(j.get("state"), ensure_ascii=False))
-          print("files:", json.dumps(j.get("files"), ensure_ascii=False)[:300])
-          print("links:")
-          for k, v in (j.get("links") or {}).items():
-              print("  ", k, "=", v)
-          print()
-          concept = j.get("conceptrecid")
-          try:
-              vs = get(f"https://zenodo.org/api/records/{concept}/versions?size=20")
-              print("VERSIONS:", vs.get("hits", {}).get("total"))
-              for h in vs.get("hits", {}).get("hits", []):
-                  m = h.get("metadata", {})
-                  print("  id=", h.get("id"), "ver=", m.get("version"), "access=", m.get("access_right"),
-                        "date=", m.get("publication_date"), "title=", (m.get("title") or "")[:60])
-          except Exception as e:
-              print("versions error:", repr(e)[:200])
-          print()
-          # 老版本 v0.1.0 是否可见文件
-          try:
-              c = get(f"https://zenodo.org/api/records/{concept}")
-              mo = c.get("metadata", {})
-              print("CONCEPT access_right:", mo.get("access_right"))
-              print("CONCEPT files:", json.dumps(c.get("files"), ensure_ascii=False)[:300])
-          except Exception as e:
-              print("concept error:", repr(e)[:200])
+          files = j.get("files") or []
+          print("ID:", j.get("id"), "concept:", j.get("conceptrecid"))
+          print("version:", md.get("version"), "date:", md.get("publication_date"))
+          print("title:", md.get("title"))
+          print("access_right:", md.get("access_right"), " license:", (md.get("license") or {}).get("id"))
+          print("file_count:", len(files), " total_bytes:", sum(int(f.get("size") or 0) for f in files))
+          print("total_GB: %.2f" % (sum(int(f.get("size") or 0) for f in files)/1e9))
+          print("first 12:")
+          for f in files[:12]:
+              print("   %12d  %s" % (int(f.get("size") or 0), f.get("key")))
+          exts = {}
+          for f in files:
+              e = (f.get("key") or "").split(".")[-1].lower()
+              exts[e] = exts.get(e, 0) + 1
+          print("extensions:", json.dumps(exts, ensure_ascii=False))
+          print("access_request:", (j.get("links") or {}).get("access_request"))
           PY
